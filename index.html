@@ -1256,6 +1256,138 @@ async function sb(table, method, body, match) {
   return true;
 }
 
+// ── Realtime sync ─────────────────────────────────────────
+let realtimeSocket = null;
+let realtimeChannel = null;
+
+function startRealtime() {
+  if (realtimeSocket) return; // already connected
+
+  const wsUrl = `wss://iuqtbanpkvuyfrhhcwmu.supabase.co/realtime/v1/websocket?apikey=${SUPABASE_KEY}&vsn=1.0.0`;
+  realtimeSocket = new WebSocket(wsUrl);
+
+  realtimeSocket.onopen = () => {
+    // Join the realtime channel for all jw_ tables
+    const joinMsg = JSON.stringify({
+      topic: 'realtime:public',
+      event: 'phx_join',
+      payload: {
+        config: {
+          broadcast: { self: false },
+          postgres_changes: [
+            { event: '*', schema: 'public', table: 'jw_distributors' },
+            { event: '*', schema: 'public', table: 'jw_prospects' },
+            { event: '*', schema: 'public', table: 'jw_ops_data' },
+            { event: '*', schema: 'public', table: 'jw_ops_cols' },
+            { event: '*', schema: 'public', table: 'jw_orders' },
+            { event: '*', schema: 'public', table: 'jw_tracking' },
+            { event: '*', schema: 'public', table: 'jw_ideas' },
+            { event: '*', schema: 'public', table: 'jw_templates' },
+          ]
+        }
+      },
+      ref: '1'
+    });
+    realtimeSocket.send(joinMsg);
+
+    // Heartbeat every 30s to keep connection alive
+    setInterval(() => {
+      if (realtimeSocket.readyState === WebSocket.OPEN) {
+        realtimeSocket.send(JSON.stringify({ topic: 'phoenix', event: 'heartbeat', payload: {}, ref: '0' }));
+      }
+    }, 30000);
+  };
+
+  realtimeSocket.onmessage = async (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+    if (msg.event !== 'postgres_changes') return;
+
+    const table = msg.payload?.data?.table;
+    if (!table || !table.startsWith('jw_')) return;
+
+    // Don't reload if we're the one who just saved (within last 2s)
+    if (Date.now() - lastSaveTime < 2000) return;
+
+    setSaveStatus('saving', 'Syncing…');
+    await reloadTable(table);
+    setSaveStatus('saved', 'All changes saved');
+
+    // Re-render the currently active tab
+    const activeTab = document.querySelector('.tab-btn.active');
+    if (activeTab) {
+      const tabMap = ['summary','ops','orders','tracking','ideas','templates'];
+      const idx = [...document.querySelectorAll('.tab-btn')].indexOf(activeTab);
+      const tab = tabMap[idx];
+      if (tab === 'summary') render();
+      else if (tab === 'ops') renderOps();
+      else if (tab === 'orders') renderOrders();
+      else if (tab === 'tracking') renderTracking();
+      else if (tab === 'ideas') renderIdeas();
+      else if (tab === 'templates') renderTemplates();
+    }
+  };
+
+  realtimeSocket.onclose = () => {
+    realtimeSocket = null;
+    // Reconnect after 5s
+    setTimeout(startRealtime, 5000);
+  };
+
+  realtimeSocket.onerror = () => {
+    realtimeSocket?.close();
+  };
+}
+
+async function reloadTable(table) {
+  try {
+    switch(table) {
+      case 'jw_distributors': {
+        const rows = await sb('jw_distributors', 'GET', null, 'select=id,data&order=id');
+        distributors = rows.map(r => ({ ...r.data, id: r.id }));
+        break;
+      }
+      case 'jw_prospects': {
+        const rows = await sb('jw_prospects', 'GET', null, 'select=id,data&order=id');
+        prospects = rows.map(r => ({ ...r.data, id: r.id }));
+        break;
+      }
+      case 'jw_ops_data': {
+        const rows = await sb('jw_ops_data', 'GET', null, 'select=dist_id,data');
+        opsData = Object.fromEntries(rows.map(r => [r.dist_id, r.data]));
+        break;
+      }
+      case 'jw_ops_cols': {
+        const rows = await sb('jw_ops_cols', 'GET', null, 'select=cols&id=eq.1');
+        opsCustomCols = rows.length ? (rows[0].cols || []) : [];
+        break;
+      }
+      case 'jw_orders': {
+        const rows = await sb('jw_orders', 'GET', null, 'select=id,data&order=id');
+        ordersData = rows.map(r => ({ ...r.data, id: r.id }));
+        break;
+      }
+      case 'jw_tracking': {
+        const rows = await sb('jw_tracking', 'GET', null, 'select=cell_key,rag,note');
+        trackingData = Object.fromEntries(rows.map(r => [r.cell_key, { rag: r.rag, note: r.note }]));
+        break;
+      }
+      case 'jw_ideas': {
+        const rows = await sb('jw_ideas', 'GET', null, 'select=id,data&order=id');
+        ideasData = rows.map(r => ({ ...r.data, id: r.id }));
+        break;
+      }
+      case 'jw_templates': {
+        const rows = await sb('jw_templates', 'GET', null, 'select=id,data&order=id');
+        templates = rows.map(r => ({ ...r.data, id: r.id }));
+        break;
+      }
+    }
+  } catch(e) { console.warn('reloadTable failed:', table, e); }
+}
+
+let lastSaveTime = 0;
+
 let distributors = [];
 let prospects = [];
 let opsData = {};
@@ -1350,6 +1482,7 @@ async function load() {
     await maybeDailyBackup();
     setSaveStatus('saved', 'All changes saved');
     render();
+    startRealtime();
   } catch(e) {
     console.error('Load failed:', e);
     setSaveStatus('error', 'Load failed — check connection');
@@ -1376,6 +1509,7 @@ async function saveAll() {
 
 // save() — full sync to Supabase, called after every change
 async function save() {
+  lastSaveTime = Date.now();
   setSaveStatus('saving', 'Saving…');
   try {
     await saveAll();
@@ -1667,10 +1801,16 @@ function saveRecord() {
 // ── Delete ────────────────────────────────────────────────
 function askDelete(table, id) { deleteTable = table; deleteId = id; document.getElementById('modal-confirm').classList.add('open'); }
 function closeConfirm() { document.getElementById('modal-confirm').classList.remove('open'); }
-function confirmDelete() {
-  if (deleteTable === 'prospect') prospects = prospects.filter(x => x.id !== deleteId);
-  else { distributors = distributors.filter(x => x.id !== deleteId); delete opsData[deleteId]; }
-  closeConfirm(); render(); save();
+async function confirmDelete() {
+  if (deleteTable === 'prospect') {
+    prospects = prospects.filter(x => x.id !== deleteId);
+    await deleteProspectDb(deleteId);
+  } else {
+    distributors = distributors.filter(x => x.id !== deleteId);
+    delete opsData[deleteId];
+    await deleteDistDb(deleteId);
+  }
+  closeConfirm(); render(); await save();
 }
 
 // ── Promote ───────────────────────────────────────────────
@@ -2104,11 +2244,12 @@ function saveTemplate() {
   save();
 }
 
-function deleteTemplate(id) {
+async function deleteTemplate(id) {
   if (!confirm('Delete this template?')) return;
   templates = templates.filter(x => x.id !== id);
   renderTemplates();
-  save();
+  await deleteTemplateDb(id);
+  await save();
 }
 
 function copyChip(el) {
@@ -2403,11 +2544,12 @@ function saveIdea() {
   save();
 }
 
-function deleteIdea(id) {
+async function deleteIdea(id) {
   if (!confirm('Delete this idea?')) return;
   ideasData = ideasData.filter(x => x.id !== id);
   renderIdeas();
-  save();
+  await deleteIdeaDb(id);
+  await save();
 }
 
 function renderIdeas() {
@@ -2907,11 +3049,12 @@ function saveOrder() {
   save();
 }
 
-function deleteOrder(id) {
+async function deleteOrder(id) {
   if (!confirm('Delete this order?')) return;
   ordersData = ordersData.filter(x => x.id !== id);
   renderOrders();
-  save();
+  await deleteOrderDb(id);
+  await save();
 }
 
 function dispatchInputStyle(target, actual) {
