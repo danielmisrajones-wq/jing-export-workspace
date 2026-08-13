@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>JING — Distributor Workspace</title>
+<title>JINGtea — Distributor Workspace</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -401,13 +401,22 @@
       <polygon points="27,5 23,14 31,14" fill="none" stroke="#ffffff" stroke-width="1.3" stroke-linejoin="round"/>
       <polygon points="27,9 24.5,14 29.5,14" fill="#ffffff"/>
     </svg>
-    <div class="app-name">JING <span>Distributor Workspace</span></div>
+    <div class="app-name">JINGtea <span>Distributor Workspace</span></div>
   </div>
-  <div style="display:flex;align-items:center;gap:10px;">
+  <div style="display:flex;align-items:center;gap:8px;">
     <div class="save-pill">
       <div class="save-dot saving" id="save-dot"></div>
       <span id="save-text">Loading…</span>
     </div>
+    <button class="btn" onclick="exportData()" style="font-size:11px;padding:5px 11px;" title="Export all data as JSON">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 1v7M3.5 5.5L6 8l2.5-2.5M2 10h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Export
+    </button>
+    <label class="btn" style="font-size:11px;padding:5px 11px;cursor:pointer;" title="Import data from JSON file">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 8V1M3.5 3.5L6 1l2.5 2.5M2 10h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Import
+      <input type="file" accept=".json" onchange="importData(event)" style="display:none;"/>
+    </label>
     <button class="btn" onclick="openRestoreModal()" style="font-size:11px;padding:5px 11px;" title="Browse and restore daily backups">
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6a4 4 0 104-4H4M4 2L2 4l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Backups
@@ -1448,6 +1457,51 @@ async function maybeDailyBackup() {
     });
     localStorage.setItem('jw_last_backup', today);
   } catch(e) { console.warn('Backup failed:', e); }
+}
+
+// ── Export / Import ───────────────────────────────────────
+function exportData() {
+  const data = { distributors, prospects, opsData, opsCustomCols, ordersData, trackingData, ideasData, templates, nextId, nextOrderId, nextIdeaId, nextTemplateId };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `jing-workspace-export-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function importData(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (!confirm('Import this file? This will overwrite all current data in the workspace.')) {
+    event.target.value = '';
+    return;
+  }
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    distributors  = data.distributors  || [];
+    prospects     = data.prospects     || [];
+    opsData       = data.opsData       || {};
+    opsCustomCols = data.opsCustomCols || [];
+    ordersData    = data.ordersData    || [];
+    trackingData  = data.trackingData  || {};
+    ideasData     = data.ideasData     || [];
+    templates     = data.templates     || [];
+    nextId         = data.nextId         || 1;
+    nextOrderId    = data.nextOrderId    || 1;
+    nextIdeaId     = data.nextIdeaId     || 1;
+    nextTemplateId = data.nextTemplateId || 1;
+    initOpsCustomCols();
+    setSaveStatus('saving', 'Importing to Supabase…');
+    await saveAll();
+    setSaveStatus('saved', 'Import complete');
+    render();
+  } catch(e) {
+    alert('Import failed — make sure the file is a valid JING workspace export.');
+    console.error(e);
+  }
+  event.target.value = '';
 }
 
 // ── Restore from backup ───────────────────────────────────
